@@ -106,8 +106,14 @@ func Stage(dataDir, privateRegistry string, resolver *images.Resolver) (string, 
 	// If we didn't find the requested image in a tarball, pull it from the remote registry.
 	// Note that this will fail (potentially after a long delay) if the registry cannot be reached.
 	if img == nil {
+		registries, err := getPrivateRegistries(privateRegistry)
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to load private registry configuration from %s", privateRegistry)
+		}
+		multiKeychain := authn.NewMultiKeychain(registries, authn.DefaultKeychain)
+
 		logrus.Infof("Pulling runtime image %s", ref)
-		img, err = remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+		img, err = remote.Image(ref, remote.WithAuthFromKeychain(multiKeychain), remote.WithTransport(registries))
 		if err != nil {
 			return "", errors.Wrapf(err, "failed to get runtime image %s", ref)
 		}
