@@ -38,7 +38,7 @@ var (
 type StaticPodConfig struct {
 	ManifestsDir    string
 	ImagesDir       string
-	Images          images.Images
+	Resolver        *images.Resolver
 	CloudProvider   *CloudProviderConfig
 	CISMode         bool
 	DataDir         string
@@ -82,16 +82,17 @@ func (s *StaticPodConfig) KubeProxy(args []string) error {
 
 // APIServer sets up the apiserver static pod once etcd is available, returning the authenticator and request handler.
 func (s *StaticPodConfig) APIServer(ctx context.Context, etcdReady <-chan struct{}, args []string) (authenticator.Request, http.Handler, error) {
+	image := s.Resolver.MustGetReference(images.KubeAPIServer).Name()
+	if err := images.Pull(s.ImagesDir, images.KubeAPIServer, image); err != nil {
+		return nil, nil, err
+	}
+
 	auditLogFile := filepath.Join(s.DataDir, "server/logs/audit.log")
 	if s.CloudProvider != nil {
 		args = append(args,
 			"--cloud-provider="+s.CloudProvider.Name,
 			"--cloud-config="+s.CloudProvider.Path)
 	}
-	if err := images.Pull(s.ImagesDir, "kube-apiserver", s.Images.KubeAPIServer); err != nil {
-		return nil, nil, err
-	}
-
 	if s.CISMode {
 		args = append(args,
 			"--audit-policy-file="+s.AuditPolicyFile,
@@ -118,7 +119,7 @@ func (s *StaticPodConfig) APIServer(ctx context.Context, etcdReady <-chan struct
 		return staticpod.Run(s.ManifestsDir, staticpod.Args{
 			Command:   "kube-apiserver",
 			Args:      args,
-			Image:     s.Images.KubeAPIServer,
+			Image:     image,
 			Dirs:      append(ssldirs, filepath.Dir(auditLogFile)),
 			CPUMillis: 250,
 			Files:     []string{etcdNameFile(s.DataDir)},
@@ -129,14 +130,15 @@ func (s *StaticPodConfig) APIServer(ctx context.Context, etcdReady <-chan struct
 
 // Scheduler starts the kube-scheduler static pod, once the apiserver is available.
 func (s *StaticPodConfig) Scheduler(apiReady <-chan struct{}, args []string) error {
-	if err := images.Pull(s.ImagesDir, "kube-scheduler", s.Images.KubeScheduler); err != nil {
+	image := s.Resolver.MustGetReference(images.KubeScheduler).Name()
+	if err := images.Pull(s.ImagesDir, images.KubeScheduler, image); err != nil {
 		return err
 	}
 	return after(apiReady, func() error {
 		return staticpod.Run(s.ManifestsDir, staticpod.Args{
 			Command:     "kube-scheduler",
 			Args:        args,
-			Image:       s.Images.KubeScheduler,
+			Image:       image,
 			HealthPort:  10251,
 			HealthProto: "HTTP",
 			CPUMillis:   100,
@@ -158,14 +160,14 @@ func after(after <-chan struct{}, f func() error) error {
 
 // ControllerManager starts the kube-controller-manager static pod, once the apiserver is available.
 func (s *StaticPodConfig) ControllerManager(apiReady <-chan struct{}, args []string) error {
+	image := s.Resolver.MustGetReference(images.KubeControllerManager).Name()
+	if err := images.Pull(s.ImagesDir, images.KubeControllerManager, image); err != nil {
+		return err
+	}
 	if s.CloudProvider != nil {
 		args = append(args,
 			"--cloud-provider="+s.CloudProvider.Name,
 			"--cloud-config="+s.CloudProvider.Path)
-	}
-
-	if err := images.Pull(s.ImagesDir, "kube-controller-manager", s.Images.KubeControllManager); err != nil {
-		return err
 	}
 	return after(apiReady, func() error {
 		return staticpod.Run(s.ManifestsDir, staticpod.Args{
@@ -174,7 +176,7 @@ func (s *StaticPodConfig) ControllerManager(apiReady <-chan struct{}, args []str
 				"--flex-volume-plugin-dir=/usr/libexec/kubernetes/kubelet-plugins/volume/exec",
 				"--terminated-pod-gc-threshold=1000",
 			),
-			Image:       s.Images.KubeControllManager,
+			Image:       image,
 			HealthPort:  10252,
 			HealthProto: "HTTP",
 			CPUMillis:   200,
@@ -206,7 +208,8 @@ func (s *StaticPodConfig) CurrentETCDOptions() (opts executor.InitialOptions, er
 
 // ETCD starts the etcd static pod.
 func (s *StaticPodConfig) ETCD(args executor.ETCDConfig) error {
-	if err := images.Pull(s.ImagesDir, "etcd", s.Images.ETCD); err != nil {
+	image := s.Resolver.MustGetReference(images.ETCD).Name()
+	if err := images.Pull(s.ImagesDir, images.ETCD, image); err != nil {
 		return err
 	}
 
@@ -228,7 +231,7 @@ func (s *StaticPodConfig) ETCD(args executor.ETCDConfig) error {
 		Args: []string{
 			"--config-file=" + confFile,
 		},
-		Image: s.Images.ETCD,
+		Image: image,
 		Dirs:  []string{args.DataDir},
 		Files: []string{
 			args.ServerTrust.CertFile,
@@ -306,7 +309,7 @@ func writeDefaultPolicyFile(policyFilePath string) error {
 		},
 		ObjectMeta: metav1.ObjectMeta{},
 		Rules: []auditv1.PolicyRule{
-			auditv1.PolicyRule{
+			{
 				Level: "None",
 			},
 		},
@@ -315,20 +318,23 @@ func writeDefaultPolicyFile(policyFilePath string) error {
 	if err != nil {
 		return err
 	}
-	return writeArgFile(policyFilePath, bytes)
+	return writeIfNotExists(policyFilePath, bytes)
 }
 
-func writeArgFile(path string, content []byte) error {
+// writeIfNotExists writes content to a file at a given path, but only if the file does not already exist
+func writeIfNotExists(path string, content []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else {
-		if !os.IsNotExist(err) {
-			return err
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
 		}
+		return err
 	}
-	return ioutil.WriteFile(path, content, 0600)
+	defer file.Close()
+	_, err = file.Write(content)
+	return err
 }
