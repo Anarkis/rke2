@@ -15,6 +15,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/cache"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -54,6 +55,11 @@ func symlinkBinDir(dataDir string) string {
 	return filepath.Join(dataDir, "bin")
 }
 
+// runtimeCacheDir returns the path to dataDir/agent/cache/runtime
+func runtimeCacheDir(dataDir string) string {
+	return filepath.Join(dataDir, "agent", "cache", "runtime")
+}
+
 // dirExists returns true if a directory exists at the given path.
 func dirExists(dir string) bool {
 	if s, err := os.Stat(dir); err == nil && s.IsDir() {
@@ -62,14 +68,14 @@ func dirExists(dir string) bool {
 	return false
 }
 
-// Stage extracts binaries and manifests from the runtime image specified in the image configuration
-// into the directory at dataDir. It attempts to load the runtime image from a tarball at
-// dataDir/agent/images, falling back to a remote image pull if the image is not found within a
-// tarball.  Extraction is skipped if a bin directory for the specified image already exists. It
-// also rewrites any HelmCharts to pass through the --system-default-registry value.  Unique image
-// detection is accomplished by hashing the image name and tag, or the image digest, depending on
-// what the runtime image reference points at.  If the bin directory already exists, or content is
-// successfully extracted, the bin directory path is returned.
+// Stage extracts binaries and manifests from the runtime image specified in imageConf into the directory
+// at dataDir. It attempts to load the runtime image from a tarball at dataDir/agent/images,
+// falling back to a remote image pull if the image is not found within a tarball.
+// Extraction is skipped if a bin directory for the specified image already exists. It also rewrites
+// any HelmCharts to pass through the --system-default-registry value.
+// Unique image detection is accomplished by hashing the image name and tag, or the image digest,
+// depending on what the runtime image reference points at.
+// If the bin directory already exists, or content is successfully extracted, the bin directory path is returned.
 func Stage(dataDir, privateRegistry string, resolver *images.Resolver) (string, error) {
 	var img v1.Image
 
@@ -82,45 +88,53 @@ func Stage(dataDir, privateRegistry string, resolver *images.Resolver) (string, 
 
 	refBinDir := binDirForDigest(dataDir, refDigest)
 	manifestsDir := manifestsDir(dataDir)
+	cacheDir := runtimeCacheDir(dataDir)
+	fsCache := cache.NewFilesystemCache(cacheDir)
 
-	// Skip content extraction if the bin dir for this runtime image already exists
+	// Try to use configured runtime image from an airgap tarball
+	img, err = preloadBootstrapFromRuntime(dataDir, resolver)
+	if err != nil {
+		return "", err
+	}
+
+	// If we didn't find the requested image in a tarball, pull it from the remote registry.
+	// Note that this will fail (potentially after a long delay) if the registry cannot be reached.
+	if img == nil {
+		logrus.Infof("Pulling runtime image %s", ref)
+		img, err = remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to get runtime image %s", ref)
+		}
+	}
+
+	// Wrap runtime image in layer cache before extracting to speed use on subsequent boots
+	img = cache.Image(img, fsCache)
+
+	// charts get extracted every time; bin only gets extracted the first time
+	extractPaths := map[string]string{
+		"charts": manifestsDir,
+	}
+
 	if dirExists(refBinDir) {
 		logrus.Infof("Runtime image %s bin dir already exists at %s; skipping extract", ref, refBinDir)
 	} else {
-		// Try to use configured runtime image from an airgap tarball
-		img, err = preloadBootstrapFromRuntime(dataDir, resolver)
-		if err != nil {
-			return "", err
-		}
+		extractPaths["bin"] = refBinDir
+	}
 
-		// If we didn't find the requested image in a tarball, pull it from the remote registry.
-		// Note that this will fail (potentially after a long delay) if the registry cannot be reached.
-		if img == nil {
-			logrus.Infof("Pulling runtime image %s", ref)
-			img, err = remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
-			if err != nil {
-				return "", errors.Wrapf(err, "Failed to pull runtime image %s", ref)
-			}
-		}
+	// Extract binaries
+	if err := extractToDirs(img, dataDir, extractPaths); err != nil {
+		return "", errors.Wrap(err, "failed to extract runtime image")
+	}
 
-		// Extract binaries
-		if err := extractToDir(refBinDir, "/bin/", img, ref.String()); err != nil {
-			return "", err
-		}
-		if err := os.Chmod(refBinDir, 0755); err != nil {
-			return "", err
-		}
-
-		// Extract charts to manifests dir
-		if err := extractToDir(manifestsDir, "/charts/", img, ref.String()); err != nil {
-			return "", err
-		}
+	// Ensure permissions
+	if err := os.Chmod(refBinDir, 0755); err != nil {
+		return "", err
 	}
 
 	// Fix up HelmCharts to pass through configured values
 	// This needs to be done every time in order to sync values from the CLI
 	if err := setChartValues(dataDir, resolver.Registry.Name()); err != nil {
-		return "", err
+		return "", errors.Wrap(err, "failed to set system-default-registry on HelmCharts")
 	}
 
 	// ignore errors on symlink rewrite
@@ -130,10 +144,9 @@ func Stage(dataDir, privateRegistry string, resolver *images.Resolver) (string, 
 	return refBinDir, nil
 }
 
-// extract extracts image content to targetDir all content from reader where the filename is prefixed with prefix.
-// The imageName argument is used solely for logging.
-// The destination directory is expected to be nonexistent or empty.
-func extract(imageName string, targetDir string, prefix string, reader io.Reader) error {
+// extract extracts image content to targetDir using a tar interface.
+// Only files within subdirectories present in the dirs map are extracted.
+func extract(targetDir string, dirs map[string]string, reader io.Reader) error {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return err
 	}
@@ -142,36 +155,43 @@ func extract(imageName string, targetDir string, prefix string, reader io.Reader
 	for {
 		h, err := t.Next()
 		if err == io.EOF {
-			logrus.Infof("Done extracting %s", imageName)
 			return nil
 		} else if err != nil {
 			return err
 		}
 
-		if h.FileInfo().IsDir() {
-			continue
-		}
+		targetName := filepath.Join(targetDir, h.Name)
+		targetDir := filepath.Dir(h.Name)
 
-		n := filepath.Join("/", h.Name)
-		if !strings.HasPrefix(n, prefix) {
-			continue
-		}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if _, ok := dirs[targetDir]; !ok {
+				continue
+			}
+			if _, err := os.Stat(targetName); err != nil {
+				if err := os.MkdirAll(targetName, 0755); err != nil {
+					return err
+				}
+			}
+		case tar.TypeReg:
+			if _, ok := dirs[targetDir]; !ok {
+				continue
+			}
+			logrus.Infof("Extracting file %s", h.Name)
 
-		logrus.Infof("Extracting file %s", h.Name)
+			mode := h.FileInfo().Mode() & 0755
+			f, err := os.OpenFile(targetName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
 
-		targetName := filepath.Join(targetDir, filepath.Base(n))
-		mode := h.FileInfo().Mode() & 0755
-		f, err := os.OpenFile(targetName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
-		if err != nil {
-			return err
-		}
-
-		if _, err = io.Copy(f, t); err != nil {
-			f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
+			if _, err = io.Copy(f, t); err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -192,19 +212,13 @@ func releaseRefDigest(ref name.Reference) (string, error) {
 		}
 		return parts[0], nil
 	}
-	return "", fmt.Errorf("Bootstrap image %s is not a not a reference to a digest or version tag matching pattern %s", ref, releasePattern)
+	return "", fmt.Errorf("Runtime image %s is not a not a reference to a digest or version tag (%s)", ref, releasePattern)
 }
 
-// extractToDir extracts to targetDir all content from img where the filename is prefixed with prefix.
-// The imageName argument is used solely for logging.
+// extractToDirs extracts to targetDir all content from img, then moves the content into place using the directory map.
 // Extracted content is staged through a temporary directory and moved into place, overwriting any existing files.
-func extractToDir(dir, prefix string, img v1.Image, imageName string) error {
-	logrus.Infof("Extracting %s %s to %s", imageName, prefix, dir)
-	if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
-		return err
-	}
-
-	tempDir, err := ioutil.TempDir(filepath.Split(dir))
+func extractToDirs(img v1.Image, dataDir string, dirs map[string]string) error {
+	tempDir, err := ioutil.TempDir(dataDir, "runtime-*")
 	if err != nil {
 		return err
 	}
@@ -213,45 +227,68 @@ func extractToDir(dir, prefix string, img v1.Image, imageName string) error {
 	imageReader := mutate.Extract(img)
 	defer imageReader.Close()
 
-	// Extract content to temporary directory.
-	if err := extract(imageName, tempDir, prefix, imageReader); err != nil {
-		return err
-	}
-
-	// Try to rename the temp dir into its target location.
-	if err := os.Rename(tempDir, dir); err == nil {
-		// Successfully renamed into place, nothing else to do.
-		return nil
-	} else if !os.IsExist(err) {
-		// Failed to rename, but not because the destination already exists.
-		return err
-	}
-
-	// Target directory already exists (got ErrExist above), fall back list/rename files into place.
-	files, err := ioutil.ReadDir(tempDir)
-	if err != nil {
+	// Extract image contents to temporary directory.
+	if err := extract(tempDir, dirs, imageReader); err != nil {
 		return err
 	}
 
 	var errs []error
-	for _, file := range files {
-		src := filepath.Join(tempDir, file.Name())
-		dst := filepath.Join(dir, file.Name())
-		if err := os.Rename(src, dst); os.IsExist(err) {
-			// Can't rename because dst already exists, remove it...
-			if err = os.RemoveAll(dst); err != nil {
-				errs = append(errs, errors.Wrapf(err, "failed to remove %s", dst))
-				continue
+
+	// Move the extracted content into place.
+	for source, dest := range dirs {
+		tempSource := filepath.Join(tempDir, source)
+		if _, err := os.Stat(tempSource); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		logrus.Debugf("Moving extracted content from %s to %s", tempSource, dest)
+
+		// Ensure the parent directory exists before renaming into the target location
+		destParent := filepath.Dir(dest)
+		if _, err := os.Stat(destParent); err != nil {
+			if err := os.MkdirAll(destParent, 0755); err != nil {
+				return err
 			}
-			// ...then try renaming again
-			if err = os.Rename(src, dst); err != nil {
+		}
+
+		// Try to rename the temp dir into its target location.
+		if err := os.Rename(tempSource, dest); err == nil {
+			// Successfully renamed into place, nothing else to do.
+			continue
+		} else if !os.IsExist(err) {
+			// Failed to rename, but not because the destination already exists.
+			errs = append(errs, err)
+			continue
+		}
+
+		// Target directory already exists (got ErrExist above), fall back list/rename files into place.
+		files, err := ioutil.ReadDir(tempSource)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		for _, file := range files {
+			src := filepath.Join(tempSource, file.Name())
+			dst := filepath.Join(dest, file.Name())
+			if err := os.Rename(src, dst); os.IsExist(err) {
+				// Can't rename because dst already exists, remove it...
+				if err = os.RemoveAll(dst); err != nil {
+					errs = append(errs, errors.Wrapf(err, "failed to remove %s", dst))
+					continue
+				}
+				// ...then try renaming again
+				if err = os.Rename(src, dst); err != nil {
+					errs = append(errs, errors.Wrapf(err, "failed to rename %s to %s", src, dst))
+				}
+			} else if err != nil {
+				// Other error while renaming src to dst.
 				errs = append(errs, errors.Wrapf(err, "failed to rename %s to %s", src, dst))
 			}
-		} else if err != nil {
-			// Other error while renaming src to dst.
-			errs = append(errs, errors.Wrapf(err, "failed to rename %s to %s", src, dst))
 		}
 	}
+
 	return merr.NewErrors(errs...)
 }
 
@@ -299,7 +336,7 @@ func preloadBootstrapImage(dataDir string, imageRef name.Reference) (v1.Image, e
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(path, ".tar") {
+		if !info.IsDir() {
 			files[path] = info
 		}
 		return nil
@@ -310,12 +347,13 @@ func preloadBootstrapImage(dataDir string, imageRef name.Reference) (v1.Image, e
 	// Try to find the requested tag in each file, moving on to the next if there's an error
 	for fileName := range files {
 		img, err := tarball.ImageFromPath(fileName, &imageTag)
-		if err != nil {
-			logrus.Debugf("Did not find %s in %s: %s", imageTag, fileName, err)
-			continue
+		if img != nil {
+			logrus.Debugf("Found %s in %s", imageTag, fileName)
+			return img, nil
 		}
-		logrus.Debugf("Found %s in %s", imageTag, fileName)
-		return img, nil
+		if err != nil {
+			logrus.Infof("Failed to check %s: %v", fileName, err)
+		}
 	}
 	logrus.Debugf("No local image available for %s: not found in any file in %s", imageTag, imagesDir)
 	return nil, nil
