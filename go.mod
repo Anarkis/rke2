@@ -89,3 +89,5 @@ require (
 	k8s.io/utils v0.0.0-20211116205334-6203023598ed
 	sigs.k8s.io/yaml v1.3.0
 )
+
+replace github.com/k3s-io/k3s => github.com/brandond/k3s v1.23.2-0.20220415234836-a64a7cacd76f

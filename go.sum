@@ -176,6 +176,8 @@ github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdn
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
 github.com/boltdb/bolt v1.3.1/go.mod h1:clJnj/oiGkjum5o1McbSZDSLxVThjynRyGBgiAx27Ps=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc/go.mod h1:paBWMcWSl3LHKBqUq+rly7CNSldXjb2rDl3JlRe0mD8=
+github.com/brandond/k3s v1.23.2-0.20220415234836-a64a7cacd76f h1:lMin7CSAWMqC2V3btPPTnHRV+slHe3y7ofhLd6uVu1g=
+github.com/brandond/k3s v1.23.2-0.20220415234836-a64a7cacd76f/go.mod h1:bPR1VomK4ge8L6XYTZZ7TnQTrTMeg7k6J74DPr1ROJY=
 github.com/bronze1man/goStrongswanVici v0.0.0-20201105010758-936f38b697fd h1:qn6a8rGrW+7p4ghypmYHZUKewXURuUDYxKqZxEoFjPc=
 github.com/bronze1man/goStrongswanVici v0.0.0-20201105010758-936f38b697fd/go.mod h1:fWUtBEPt2yjrr3WFhOqvajM8JSEU8bEeBcoeSCsKRpc=
 github.com/buger/jsonparser v0.0.0-20180808090653-f4dd9f5a6b44/go.mod h1:bbYlZJ7hK1yFx9hf58LP0zeX7UjIGs20ufpu3evjr+s=
@@ -743,8 +745,6 @@ github.com/k3s-io/etcd/server/v3 v3.5.3-k3s1 h1:MVTrb5cp75kSMA9K240VMa5I+GKuYYP9
 github.com/k3s-io/etcd/server/v3 v3.5.3-k3s1/go.mod h1:xwZlQLuAWsWw5rpb/Gwzi3nFie9STKcrKQbM6evLi5g=
 github.com/k3s-io/helm-controller v0.12.1 h1:cZgXAreTvz+Aq3DzxL6RB6P1lEAlfDXxOKtwOzrvo+Y=
 github.com/k3s-io/helm-controller v0.12.1/go.mod h1:yBS3F5emwVjyzUUi3VWAuj9+Ogoq84Mf7CBXbAnKI1U=
-github.com/k3s-io/k3s v1.23.6-0.20220415164140-3e3549e45cb9 h1:4LoMhpSjM9KpD3McGso+neZoLXS2nh7DADfSg+Q+G4Y=
-github.com/k3s-io/k3s v1.23.6-0.20220415164140-3e3549e45cb9/go.mod h1:O9mlsi5lEeCIVkVeiEOrTyYloEAr3/HkxOZig3l2V4Q=
 github.com/k3s-io/kine v0.8.1 h1:cuxZmENBUL5lvJORWGBjn87kKtIo8GK7o8H1hu+vd98=
 github.com/k3s-io/kine v0.8.1/go.mod h1:gaezUQ9c8iw8vxDV/DI8vc93h2rCpTvY37kMdYPMsyc=
 github.com/k3s-io/klog v1.0.0-k3s2 h1:yyvD2bQbxG7m85/pvNctLX2bUDmva5kOBvuZ77tTGBA=
@@ -1300,6 +1300,8 @@ github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 h1:eY9dn8+vbi4tKz5
 github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2/go.mod h1:UETIi67q53MR2AWcXfiuqkDkRtnGDLqkBTpCHuJHxtU=
 github.com/xlab/treeprint v0.0.0-20181112141820-a009c3971eca/go.mod h1:ce1O1j6UtZfjr22oyGxGLbauSBp2YVXpARAosm7dHBg=
 github.com/xordataexchange/crypt v0.0.3-0.20170626215501-b2862e3d0a77/go.mod h1:aYKd//L2LvnjZzWKhF00oedf4jCCReLcmhLdhm1A27Q=
+github.com/yl2chen/cidranger v1.0.2 h1:lbOWZVCG1tCRX4u24kuM1Tb4nHqWkDxwLdoS+SevawU=
+github.com/yl2chen/cidranger v1.0.2/go.mod h1:9U1yz7WPYDwf0vpNWFaeRh0bjwz5RVgRy/9UEQfHl0g=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
