@@ -193,5 +193,6 @@ RUN set -x \
     less \
     socat \
     vim
+RUN useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
 ENTRYPOINT ["/bin/rke2"]
 CMD ["server"]
